@@ -7243,10 +7243,10 @@ _add_routing_rule() {
     _item "7" "Telegram"
     _item "8" "Google"
     _item "9" "AI服务(国际)"
-    _item "c" "MyTVSuper"
-    _item "d" "自定义域名"
-    _item "a" "所有流量"
+    _item "d" "MyTVSuper"
+    _item "c" "自定义域名"
     _item "b" "广告屏蔽 (geosite)"
+    _item "a" "所有流量"
     _item "0" "返回"
     _line
     
@@ -7263,8 +7263,8 @@ _add_routing_rule() {
         7) rule_type="telegram" ;;
         8) rule_type="google" ;;
         9) rule_type="ai-intl" ;;
-        c|C) rule_type="mytvsuper" ;;
-        d|D)
+        d|D) rule_type="mytvsuper" ;;
+        c|C)
             rule_type="custom"
             echo ""
             echo -e "  ${Y}输入要分流的匹配规则 (逗号分隔):${NC}"
@@ -7286,8 +7286,8 @@ _add_routing_rule() {
                 return
             fi
             ;;
-        a|A) rule_type="all" ;;
         b|B) rule_type="ads" ;;
+        a|A) rule_type="all" ;;
         0|"") return ;;
         *) _warn "无效选项"; _pause; return ;;
     esac
