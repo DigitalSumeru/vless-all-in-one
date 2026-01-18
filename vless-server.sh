@@ -123,12 +123,12 @@ db_get() {
     local core="$1" protocol="$2"
     [[ ! -f "$DB_FILE" ]] && return 1
 
-    local config=$(jq -r --arg c "$core" --arg p "$protocol" \
+    local config=$(jq --arg c "$core" --arg p "$protocol" \
         '.[$c][$p] // empty' "$DB_FILE" 2>/dev/null)
 
-    [[ -z "$config" ]] && return 1
+    [[ -z "$config" || "$config" == "null" ]] && return 1
 
-    # 直接返回配置（可能是数组或单个对象）
+    # 直接返回配置（保持 JSON 格式）
     echo "$config"
 }
 
@@ -138,18 +138,18 @@ db_get_field() {
     jq -r --arg p "$2" --arg f "$3" ".${1}[\$p][\$f] // empty" "$DB_FILE" 2>/dev/null
 }
 
-# 列出协议的所有端口实例
+# 列出���议的所有端口实例
 # 参数: $1=core(xray/singbox), $2=protocol
 # 返回: 端口列表，每行一个端口号
 db_list_ports() {
     local core="$1" protocol="$2"
     [[ ! -f "$DB_FILE" ]] && return 1
-    
-    local config=$(jq -r --arg c "$core" --arg p "$protocol" \
+
+    local config=$(jq --arg c "$core" --arg p "$protocol" \
         '.[$c][$p] // empty' "$DB_FILE" 2>/dev/null)
-    
-    [[ -z "$config" ]] && return 1
-    
+
+    [[ -z "$config" || "$config" == "null" ]] && return 1
+
     # 检查是否为数组
     if echo "$config" | jq -e 'type == "array"' >/dev/null 2>&1; then
         echo "$config" | jq -r '.[].port'
@@ -165,12 +165,12 @@ db_list_ports() {
 db_get_port_config() {
     local core="$1" protocol="$2" port="$3"
     [[ ! -f "$DB_FILE" ]] && return 1
-    
-    local config=$(jq -r --arg c "$core" --arg p "$protocol" \
+
+    local config=$(jq --arg c "$core" --arg p "$protocol" \
         '.[$c][$p] // empty' "$DB_FILE" 2>/dev/null)
-    
-    [[ -z "$config" ]] && return 1
-    
+
+    [[ -z "$config" || "$config" == "null" ]] && return 1
+
     if echo "$config" | jq -e 'type == "array"' >/dev/null 2>&1; then
         echo "$config" | jq --arg port "$port" '.[] | select(.port == ($port | tonumber))'
     else
