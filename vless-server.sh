@@ -452,11 +452,12 @@ get_protocol_name() {
 #═══════════════════════════════════════════════════════════════════════════════
 
 # 生成 Xray VLESS 多用户 clients 数组
-# 用法: gen_xray_vless_clients "vless" [flow]
+# 用法: gen_xray_vless_clients "vless" [flow] [port]
 # 输出: JSON 数组 [{id: "uuid1", email: "user@vless", flow: "..."}, ...]
 gen_xray_vless_clients() {
     local proto="$1"
     local flow="${2:-}"
+    local filter_port="${3:-}"
     
     local users=$(db_get_users_stats "xray" "$proto")
     if [[ -z "$users" ]]; then
@@ -465,8 +466,13 @@ gen_xray_vless_clients() {
         if [[ -n "$config" && "$config" != "null" ]]; then
             # 检查是否为数组
             if echo "$config" | jq -e 'type == "array"' >/dev/null 2>&1; then
-                # 多端口：从第一个端口获取 uuid
-                local uuid=$(echo "$config" | jq -r '.[0].uuid // empty')
+                # 多端口：优先按端口过滤，其次取第一个端口的 uuid
+                local uuid=""
+                if [[ -n "$filter_port" ]]; then
+                    uuid=$(echo "$config" | jq -r --arg port "$filter_port" '.[] | select(.port == ($port | tonumber)) | .uuid // empty' | head -n1)
+                else
+                    uuid=$(echo "$config" | jq -r '.[0].uuid // empty')
+                fi
                 if [[ -n "$uuid" ]]; then
                     if [[ -n "$flow" ]]; then
                         echo "[{\"id\":\"$uuid\",\"email\":\"default@${proto}\",\"flow\":\"$flow\"}]"
@@ -496,6 +502,7 @@ gen_xray_vless_clients() {
     declare -A seen_emails=()
     while IFS='|' read -r name uuid used quota enabled port routing; do
         [[ -z "$name" || -z "$uuid" || "$enabled" != "true" ]] && continue
+        [[ -n "$filter_port" && "$port" != "$filter_port" ]] && continue
         local email="${name}@${proto}"
         [[ -n "${seen_emails[$email]+x}" ]] && continue
         seen_emails["$email"]=1
@@ -2912,7 +2919,7 @@ add_xray_inbound_v2() {
         vless)
             # VLESS+Reality - 使用 jq 安全构建 (支持 WS 回落)
             # 获取完整的用户列表（包含子用户和 email，用于流量统计）
-            local clients=$(gen_xray_vless_clients "$base_protocol" "xtls-rprx-vision")
+            local clients=$(gen_xray_vless_clients "$base_protocol" "xtls-rprx-vision" "$port")
             [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"id\":\"$uuid\",\"email\":\"default@${base_protocol}\",\"flow\":\"xtls-rprx-vision\"}]"
             
             jq -n \
@@ -2953,7 +2960,7 @@ add_xray_inbound_v2() {
         vless-vision)
             # VLESS-Vision - 使用 jq 安全构建
             # 获取完整的用户列表（包含子用户和 email，用于流量统计）
-            local clients=$(gen_xray_vless_clients "$base_protocol" "xtls-rprx-vision")
+            local clients=$(gen_xray_vless_clients "$base_protocol" "xtls-rprx-vision" "$port")
             [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"id\":\"$uuid\",\"email\":\"default@${base_protocol}\",\"flow\":\"xtls-rprx-vision\"}]"
             
             jq -n \
@@ -2989,7 +2996,7 @@ add_xray_inbound_v2() {
         vless-ws)
             # 获取完整的用户列表（包含子用户和 email，用于流量统计）
             # vless-ws 不需要 flow
-            local clients=$(gen_xray_vless_clients "$base_protocol")
+            local clients=$(gen_xray_vless_clients "$base_protocol" "" "$port")
             [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"id\":\"$uuid\",\"email\":\"default@${base_protocol}\"}]"
             
             if [[ "$has_master" == "true" ]]; then
@@ -3049,7 +3056,7 @@ add_xray_inbound_v2() {
             ;;
         vless-ws-notls)
             # VLESS-WS 无 TLS - 专为 CF Tunnel 设计
-            local clients=$(gen_xray_vless_clients "$base_protocol")
+            local clients=$(gen_xray_vless_clients "$base_protocol" "" "$port")
             [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"id\":\"$uuid\",\"email\":\"default@${base_protocol}\"}]"
             
             # 从数据库获取 host 配置
@@ -3079,7 +3086,7 @@ add_xray_inbound_v2() {
             ;;
         vless-xhttp)
             # 获取完整的用户列表（包含子用户和 email，用于流量统计）
-            local clients=$(gen_xray_vless_clients "$base_protocol")
+            local clients=$(gen_xray_vless_clients "$base_protocol" "" "$port")
             [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"id\":\"$uuid\",\"email\":\"default@${base_protocol}\"}]"
             
             jq -n \
@@ -3120,7 +3127,7 @@ add_xray_inbound_v2() {
             local internal_port=$(echo "$cfg" | jq -r '.internal_port // .port')
             
             # 获取完整的用户列表（包含子用户和 email，用于流量统计）
-            local clients=$(gen_xray_vless_clients "$base_protocol")
+            local clients=$(gen_xray_vless_clients "$base_protocol" "" "$port")
             [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"id\":\"$uuid\",\"email\":\"default@${base_protocol}\"}]"
             
             jq -n \
@@ -15238,7 +15245,18 @@ show_all_protocols_info() {
         if [[ -n "$xray_protocols" ]]; then
             echo -e "  ${Y}Xray 协议 (vless-reality 服务):${NC}"
             for protocol in $xray_protocols; do
-                local port=$(db_get_field "xray" "$protocol" "port")
+                local port=""
+                local cfg=""
+                cfg=$(db_get "xray" "$protocol" 2>/dev/null || true)
+                if [[ -n "$cfg" ]]; then
+                    if echo "$cfg" | jq -e 'type == "array"' >/dev/null 2>&1; then
+                        port=$(echo "$cfg" | jq -r '.[].port' | tr '\n' ',' | sed 's/,$//')
+                    else
+                        port=$(echo "$cfg" | jq -r '.port // empty')
+                    fi
+                else
+                    port=$(db_get_field "xray" "$protocol" "port")
+                fi
                 if [[ -n "$port" ]]; then
                     echo -e "    ${G}$idx${NC}) $(get_protocol_name $protocol) - 端口: ${G}$port${NC}"
                     all_protocols+=("$protocol")
@@ -15314,6 +15332,10 @@ show_all_share_links() {
     local country_code=$(get_ip_country "$ipv4")
     [[ -z "$country_code" ]] && country_code=$(get_ip_country "$ipv6")
     
+    # 主协议端口（用于回落 WS/VMess）
+    local master_port=""
+    master_port=$(_get_master_port "")
+    
     # 遍历所有协议生成链接
     for protocol in $xray_protocols $singbox_protocols $standalone_protocols; do
         local cfg=""
@@ -15324,128 +15346,134 @@ show_all_share_links() {
         else
             continue
         fi
+        [[ -z "$cfg" ]] && continue
         
-        # 提取配置字段
-        local uuid=$(echo "$cfg" | jq -r '.uuid // empty')
-        local port=$(echo "$cfg" | jq -r '.port // empty')
-        local sni=$(echo "$cfg" | jq -r '.sni // empty')
-        local short_id=$(echo "$cfg" | jq -r '.short_id // empty')
-        local public_key=$(echo "$cfg" | jq -r '.public_key // empty')
-        local path=$(echo "$cfg" | jq -r '.path // empty')
-        local password=$(echo "$cfg" | jq -r '.password // empty')
-        local username=$(echo "$cfg" | jq -r '.username // empty')
-        local method=$(echo "$cfg" | jq -r '.method // empty')
-        local psk=$(echo "$cfg" | jq -r '.psk // empty')
-        local version=$(echo "$cfg" | jq -r '.version // empty')
-        local domain=$(echo "$cfg" | jq -r '.domain // empty')
-        
-        [[ -z "$port" ]] && continue
-        
-        # 检测回落协议端口
-        local display_port="$port"
-        if [[ "$protocol" == "vless-ws" || "$protocol" == "vmess-ws" ]]; then
-            if db_exists "xray" "vless-vision"; then
-                display_port=$(db_get_field "xray" "vless-vision" "port")
-            elif db_exists "xray" "trojan"; then
-                display_port=$(db_get_field "xray" "trojan" "port")
-            elif db_exists "xray" "vless"; then
-                display_port=$(db_get_field "xray" "vless" "port")
-            fi
-            [[ -z "$display_port" ]] && display_port="$port"
+        # 处理多端口数组
+        local cfg_stream=""
+        if echo "$cfg" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            cfg_stream=$(echo "$cfg" | jq -c '.[]')
+        else
+            cfg_stream=$(echo "$cfg" | jq -c '.')
         fi
         
         echo -e "  ${Y}$(get_protocol_name $protocol)${NC}"
         
-        # 生成 IPv4 链接
-        if [[ -n "$ipv4" ]]; then
-            local link=""
-            local config_ip="$ipv4"
+        while IFS= read -r cfg; do
+            [[ -z "$cfg" ]] && continue
+            
+            # 提取配置字段
+            local uuid=$(echo "$cfg" | jq -r '.uuid // empty')
+            local port=$(echo "$cfg" | jq -r '.port // empty')
+            local sni=$(echo "$cfg" | jq -r '.sni // empty')
+            local short_id=$(echo "$cfg" | jq -r '.short_id // empty')
+            local public_key=$(echo "$cfg" | jq -r '.public_key // empty')
+            local path=$(echo "$cfg" | jq -r '.path // empty')
+            local password=$(echo "$cfg" | jq -r '.password // empty')
+            local username=$(echo "$cfg" | jq -r '.username // empty')
+            local method=$(echo "$cfg" | jq -r '.method // empty')
+            local psk=$(echo "$cfg" | jq -r '.psk // empty')
+            local version=$(echo "$cfg" | jq -r '.version // empty')
+            local domain=$(echo "$cfg" | jq -r '.domain // empty')
             local stls_password=$(echo "$cfg" | jq -r '.stls_password // empty')
             
-            case "$protocol" in
-                vless) link=$(gen_vless_link "$ipv4" "$display_port" "$uuid" "$public_key" "$short_id" "$sni" "$country_code") ;;
-                vless-xhttp) link=$(gen_vless_xhttp_link "$ipv4" "$display_port" "$uuid" "$public_key" "$short_id" "$sni" "$path" "$country_code") ;;
-                vless-vision) link=$(gen_vless_vision_link "$ipv4" "$display_port" "$uuid" "$sni" "$country_code") ;;
-                vless-ws) link=$(gen_vless_ws_link "$ipv4" "$display_port" "$uuid" "$sni" "$path" "$country_code") ;;
-                vmess-ws) link=$(gen_vmess_ws_link "$ipv4" "$display_port" "$uuid" "$sni" "$path" "$country_code") ;;
-                ss2022) link=$(gen_ss2022_link "$ipv4" "$display_port" "$method" "$password" "$country_code") ;;
-                ss-legacy) link=$(gen_ss_legacy_link "$ipv4" "$display_port" "$method" "$password" "$country_code") ;;
-                hy2) link=$(gen_hy2_link "$ipv4" "$display_port" "$password" "$sni" "$country_code") ;;
-                trojan) link=$(gen_trojan_link "$ipv4" "$display_port" "$password" "$sni" "$country_code") ;;
-                snell) link=$(gen_snell_link "$ipv4" "$display_port" "$psk" "$version" "$country_code") ;;
-                snell-v5) link=$(gen_snell_v5_link "$ipv4" "$display_port" "$psk" "$version" "$country_code") ;;
-                tuic) link=$(gen_tuic_link "$ipv4" "$display_port" "$uuid" "$password" "$sni" "$country_code") ;;
-                anytls) link=$(gen_anytls_link "$ipv4" "$display_port" "$password" "$sni" "$country_code") ;;
-                naive) link=$(gen_naive_link "$domain" "$display_port" "$username" "$password" "$country_code") ;;
-                socks) link=$(gen_socks_link "$ipv4" "$display_port" "$username" "$password" "$country_code") ;;
-                # ShadowTLS 组合协议：没有标准分享链接，显示 Surge/Loon 配置
-                snell-shadowtls)
-                    echo -e "  ${Y}Surge:${NC}"
-                    echo -e "  ${C}${country_code}-Snell-ShadowTLS = snell, ${config_ip}, ${display_port}, psk=${psk}, version=${version:-4}, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
-                    has_links=true
-                    ;;
-                snell-v5-shadowtls)
-                    echo -e "  ${Y}Surge:${NC}"
-                    echo -e "  ${C}${country_code}-Snell-v5-ShadowTLS = snell, ${config_ip}, ${display_port}, psk=${psk}, version=5, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
-                    echo -e "  ${Y}Loon:${NC}"
-                    echo -e "  ${C}${country_code}-Snell-v5-ShadowTLS = snell, ${config_ip}, ${display_port}, psk=${psk}, version=5, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}${NC}"
-                    has_links=true
-                    ;;
-                ss2022-shadowtls)
-                    echo -e "  ${Y}Surge:${NC}"
-                    echo -e "  ${C}${country_code}-SS2022-ShadowTLS = ss, ${config_ip}, ${display_port}, encrypt-method=${method}, password=${password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
-                    echo -e "  ${Y}Loon:${NC}"
-                    echo -e "  ${C}${country_code}-SS2022-ShadowTLS = shadowsocks, ${config_ip}, ${display_port}, ${method}, \"${password}\", shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}${NC}"
-                    has_links=true
-                    ;;
-            esac
-            [[ -n "$link" ]] && echo -e "  ${G}$link${NC}" && has_links=true
-        fi
+            [[ -z "$port" ]] && continue
+            
+            # 检测回落协议端口
+            local display_port="$port"
+            if [[ -n "$master_port" && ("$protocol" == "vless-ws" || "$protocol" == "vmess-ws") ]]; then
+                display_port="$master_port"
+            fi
+            
+            # 生成 IPv4 链接
+            if [[ -n "$ipv4" ]]; then
+                local link=""
+                local config_ip="$ipv4"
+                
+                case "$protocol" in
+                    vless) link=$(gen_vless_link "$ipv4" "$display_port" "$uuid" "$public_key" "$short_id" "$sni" "$country_code") ;;
+                    vless-xhttp) link=$(gen_vless_xhttp_link "$ipv4" "$display_port" "$uuid" "$public_key" "$short_id" "$sni" "$path" "$country_code") ;;
+                    vless-vision) link=$(gen_vless_vision_link "$ipv4" "$display_port" "$uuid" "$sni" "$country_code") ;;
+                    vless-ws) link=$(gen_vless_ws_link "$ipv4" "$display_port" "$uuid" "$sni" "$path" "$country_code") ;;
+                    vmess-ws) link=$(gen_vmess_ws_link "$ipv4" "$display_port" "$uuid" "$sni" "$path" "$country_code") ;;
+                    ss2022) link=$(gen_ss2022_link "$ipv4" "$display_port" "$method" "$password" "$country_code") ;;
+                    ss-legacy) link=$(gen_ss_legacy_link "$ipv4" "$display_port" "$method" "$password" "$country_code") ;;
+                    hy2) link=$(gen_hy2_link "$ipv4" "$display_port" "$password" "$sni" "$country_code") ;;
+                    trojan) link=$(gen_trojan_link "$ipv4" "$display_port" "$password" "$sni" "$country_code") ;;
+                    snell) link=$(gen_snell_link "$ipv4" "$display_port" "$psk" "$version" "$country_code") ;;
+                    snell-v5) link=$(gen_snell_v5_link "$ipv4" "$display_port" "$psk" "$version" "$country_code") ;;
+                    tuic) link=$(gen_tuic_link "$ipv4" "$display_port" "$uuid" "$password" "$sni" "$country_code") ;;
+                    anytls) link=$(gen_anytls_link "$ipv4" "$display_port" "$password" "$sni" "$country_code") ;;
+                    naive) link=$(gen_naive_link "$domain" "$display_port" "$username" "$password" "$country_code") ;;
+                    socks) link=$(gen_socks_link "$ipv4" "$display_port" "$username" "$password" "$country_code") ;;
+                    # ShadowTLS 组合协议：没有标准分享链接，显示 Surge/Loon 配置
+                    snell-shadowtls)
+                        echo -e "  ${Y}Surge:${NC}"
+                        echo -e "  ${C}${country_code}-Snell-ShadowTLS = snell, ${config_ip}, ${display_port}, psk=${psk}, version=${version:-4}, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
+                        has_links=true
+                        ;;
+                    snell-v5-shadowtls)
+                        echo -e "  ${Y}Surge:${NC}"
+                        echo -e "  ${C}${country_code}-Snell-v5-ShadowTLS = snell, ${config_ip}, ${display_port}, psk=${psk}, version=5, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
+                        echo -e "  ${Y}Loon:${NC}"
+                        echo -e "  ${C}${country_code}-Snell-v5-ShadowTLS = snell, ${config_ip}, ${display_port}, psk=${psk}, version=5, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}${NC}"
+                        has_links=true
+                        ;;
+                    ss2022-shadowtls)
+                        echo -e "  ${Y}Surge:${NC}"
+                        echo -e "  ${C}${country_code}-SS2022-ShadowTLS = ss, ${config_ip}, ${display_port}, encrypt-method=${method}, password=${password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
+                        echo -e "  ${Y}Loon:${NC}"
+                        echo -e "  ${C}${country_code}-SS2022-ShadowTLS = shadowsocks, ${config_ip}, ${display_port}, ${method}, \"${password}\", shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}${NC}"
+                        has_links=true
+                        ;;
+                esac
+                [[ -n "$link" ]] && echo -e "  ${G}$link${NC}" && has_links=true
+            fi
+            
+            # 生成 IPv6 链接
+            if [[ -n "$ipv6" ]]; then
+                local link=""
+                local ip6="[$ipv6]"
+                case "$protocol" in
+                    vless) link=$(gen_vless_link "$ip6" "$display_port" "$uuid" "$public_key" "$short_id" "$sni" "$country_code") ;;
+                    vless-xhttp) link=$(gen_vless_xhttp_link "$ip6" "$display_port" "$uuid" "$public_key" "$short_id" "$sni" "$path" "$country_code") ;;
+                    vless-vision) link=$(gen_vless_vision_link "$ip6" "$display_port" "$uuid" "$sni" "$country_code") ;;
+                    vless-ws) link=$(gen_vless_ws_link "$ip6" "$display_port" "$uuid" "$sni" "$path" "$country_code") ;;
+                    vmess-ws) link=$(gen_vmess_ws_link "$ip6" "$display_port" "$uuid" "$sni" "$path" "$country_code") ;;
+                    ss2022) link=$(gen_ss2022_link "$ip6" "$display_port" "$method" "$password" "$country_code") ;;
+                    ss-legacy) link=$(gen_ss_legacy_link "$ip6" "$display_port" "$method" "$password" "$country_code") ;;
+                    hy2) link=$(gen_hy2_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
+                    trojan) link=$(gen_trojan_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
+                    snell) link=$(gen_snell_link "$ip6" "$display_port" "$psk" "$version" "$country_code") ;;
+                    snell-v5) link=$(gen_snell_v5_link "$ip6" "$display_port" "$psk" "$version" "$country_code") ;;
+                    tuic) link=$(gen_tuic_link "$ip6" "$display_port" "$uuid" "$password" "$sni" "$country_code") ;;
+                    anytls) link=$(gen_anytls_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
+                    naive) ;; # NaïveProxy 使用域名，不需要 IPv6 链接
+                    socks) link=$(gen_socks_link "$ip6" "$display_port" "$username" "$password" "$country_code") ;;
+                    # ShadowTLS 组合协议 IPv6：没有标准分享链接，显示 Surge/Loon 配置
+                    snell-shadowtls)
+                        echo -e "  ${Y}Surge (IPv6):${NC}"
+                        echo -e "  ${C}${country_code}-Snell-ShadowTLS-v6 = snell, ${ipv6}, ${display_port}, psk=${psk}, version=${version:-4}, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
+                        has_links=true
+                        ;;
+                    snell-v5-shadowtls)
+                        echo -e "  ${Y}Surge (IPv6):${NC}"
+                        echo -e "  ${C}${country_code}-Snell-v5-ShadowTLS-v6 = snell, ${ipv6}, ${display_port}, psk=${psk}, version=5, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
+                        echo -e "  ${Y}Loon (IPv6):${NC}"
+                        echo -e "  ${C}${country_code}-Snell-v5-ShadowTLS-v6 = snell, ${ipv6}, ${display_port}, psk=${psk}, version=5, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}${NC}"
+                        has_links=true
+                        ;;
+                    ss2022-shadowtls)
+                        echo -e "  ${Y}Surge (IPv6):${NC}"
+                        echo -e "  ${C}${country_code}-SS2022-ShadowTLS-v6 = ss, ${ipv6}, ${display_port}, encrypt-method=${method}, password=${password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
+                        echo -e "  ${Y}Loon (IPv6):${NC}"
+                        echo -e "  ${C}${country_code}-SS2022-ShadowTLS-v6 = shadowsocks, ${ipv6}, ${display_port}, ${method}, \"${password}\", shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}${NC}"
+                        has_links=true
+                        ;;
+                esac
+                [[ -n "$link" ]] && echo -e "  ${G}$link${NC}" && has_links=true
+            fi
+        done <<< "$cfg_stream"
         
-        # 生成 IPv6 链接
-        if [[ -n "$ipv6" ]]; then
-            local link=""
-            local ip6="[$ipv6]"
-            local stls_password=$(echo "$cfg" | jq -r '.stls_password // empty')
-            case "$protocol" in
-                vless) link=$(gen_vless_link "$ip6" "$display_port" "$uuid" "$public_key" "$short_id" "$sni" "$country_code") ;;
-                vless-xhttp) link=$(gen_vless_xhttp_link "$ip6" "$display_port" "$uuid" "$public_key" "$short_id" "$sni" "$path" "$country_code") ;;
-                vless-vision) link=$(gen_vless_vision_link "$ip6" "$display_port" "$uuid" "$sni" "$country_code") ;;
-                vless-ws) link=$(gen_vless_ws_link "$ip6" "$display_port" "$uuid" "$sni" "$path" "$country_code") ;;
-                vmess-ws) link=$(gen_vmess_ws_link "$ip6" "$display_port" "$uuid" "$sni" "$path" "$country_code") ;;
-                ss2022) link=$(gen_ss2022_link "$ip6" "$display_port" "$method" "$password" "$country_code") ;;
-                ss-legacy) link=$(gen_ss_legacy_link "$ip6" "$display_port" "$method" "$password" "$country_code") ;;
-                hy2) link=$(gen_hy2_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
-                trojan) link=$(gen_trojan_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
-                snell) link=$(gen_snell_link "$ip6" "$display_port" "$psk" "$version" "$country_code") ;;
-                snell-v5) link=$(gen_snell_v5_link "$ip6" "$display_port" "$psk" "$version" "$country_code") ;;
-                tuic) link=$(gen_tuic_link "$ip6" "$display_port" "$uuid" "$password" "$sni" "$country_code") ;;
-                anytls) link=$(gen_anytls_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
-                naive) ;; # NaïveProxy 使用域名，不需要 IPv6 链接
-                socks) link=$(gen_socks_link "$ip6" "$display_port" "$username" "$password" "$country_code") ;;
-                # ShadowTLS 组合协议 IPv6：没有标准分享链接，显示 Surge/Loon 配置
-                snell-shadowtls)
-                    echo -e "  ${Y}Surge (IPv6):${NC}"
-                    echo -e "  ${C}${country_code}-Snell-ShadowTLS-v6 = snell, ${ipv6}, ${display_port}, psk=${psk}, version=${version:-4}, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
-                    has_links=true
-                    ;;
-                snell-v5-shadowtls)
-                    echo -e "  ${Y}Surge (IPv6):${NC}"
-                    echo -e "  ${C}${country_code}-Snell-v5-ShadowTLS-v6 = snell, ${ipv6}, ${display_port}, psk=${psk}, version=5, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
-                    echo -e "  ${Y}Loon (IPv6):${NC}"
-                    echo -e "  ${C}${country_code}-Snell-v5-ShadowTLS-v6 = snell, ${ipv6}, ${display_port}, psk=${psk}, version=5, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}${NC}"
-                    has_links=true
-                    ;;
-                ss2022-shadowtls)
-                    echo -e "  ${Y}Surge (IPv6):${NC}"
-                    echo -e "  ${C}${country_code}-SS2022-ShadowTLS-v6 = ss, ${ipv6}, ${display_port}, encrypt-method=${method}, password=${password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
-                    echo -e "  ${Y}Loon (IPv6):${NC}"
-                    echo -e "  ${C}${country_code}-SS2022-ShadowTLS-v6 = shadowsocks, ${ipv6}, ${display_port}, ${method}, \"${password}\", shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}${NC}"
-                    has_links=true
-                    ;;
-            esac
-            [[ -n "$link" ]] && echo -e "  ${G}$link${NC}" && has_links=true
-        fi
         echo ""
     done
     
